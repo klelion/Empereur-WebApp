@@ -740,7 +740,8 @@ def page_export_debug():
 
     wb, data_path = get_excel_file()
 
-    st.subheader("Dernières entrées Lifestyle")
+    # 1) Lifestyle
+    st.subheader("Lifestyle – dernières entrées")
     try:
         df_life = pd.read_excel(data_path, sheet_name="Lifestyle")
         st.dataframe(df_life.tail(10))
@@ -748,12 +749,34 @@ def page_export_debug():
         st.warning(f"Impossible de lire la feuille Lifestyle : {e}")
 
     st.markdown("---")
-    st.subheader("Dernières entrées Séances Force")
+
+    # 2) Séances Force
+    st.subheader("Séances Force – dernières entrées")
     try:
         df_force = pd.read_excel(data_path, sheet_name="Données Force")
         st.dataframe(df_force.tail(10))
     except Exception as e:
         st.warning(f"Impossible de lire la feuille Données Force : {e}")
+
+    st.markdown("---")
+
+    # 3) Séances Calisthénie
+    st.subheader("Séances Calisthénie – dernières entrées")
+    try:
+        df_cali = pd.read_excel(data_path, sheet_name="Données Calisthénie")
+        st.dataframe(df_cali.tail(10))
+    except Exception as e:
+        st.warning(f"Impossible de lire la feuille Données Calisthénie : {e}")
+
+    st.markdown("---")
+
+    # 4) RPE Jour
+    st.subheader("RPE_Jour_Reps – dernières entrées")
+    try:
+        df_rpe = pd.read_excel(data_path, sheet_name="RPE_Jour_Reps")
+        st.dataframe(df_rpe.tail(10))
+    except Exception as e:
+        st.warning(f"Impossible de lire la feuille RPE_Jour_Reps : {e}")
 
     st.markdown("---")
     st.subheader("Télécharger le fichier de données complet")
@@ -776,19 +799,20 @@ def page_export_debug():
     st.subheader("♻️ Réinitialiser toutes les données")
 
     st.warning(
-        "⚠️ Cette action supprime **toutes** les données actuelles (Lifestyle, Force, Calisthénie, etc.) "
+        "⚠️ Cette action supprime **toutes** les données actuelles (Lifestyle, Force, Calisthénie, RPE, etc.) "
         "et recrée un fichier vierge à partir du modèle."
     )
 
     if st.button("🔴 Réinitialiser empereur_data.xlsx"):
         if data_path.exists():
-            data_path.unlink()  # supprime le fichier de données
+            data_path.unlink()
             st.success(
                 "Toutes les données ont été réinitialisées. "
                 "La prochaine utilisation de l'app recréera un fichier vierge à partir du modèle."
             )
         else:
             st.info("Aucun fichier de données à supprimer.")
+
 
 
 
