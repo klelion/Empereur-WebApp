@@ -738,7 +738,7 @@ def page_reco_global():
 def page_export_debug():
     st.header("📥 Export & Debug des données Empereur")
 
-    _, data_path = get_excel_file()
+    wb, data_path = get_excel_file()
 
     st.subheader("Dernières entrées Lifestyle")
     try:
@@ -761,17 +761,35 @@ def page_export_debug():
     data_path = Path(DATA_FILE)
     if not data_path.exists():
         st.info("Aucun fichier empereur_data.xlsx trouvé pour l'instant (enregistre d'abord des données).")
-        return
+    else:
+        with open(data_path, "rb") as f:
+            binary = f.read()
 
-    with open(data_path, "rb") as f:
-        binary = f.read()
+        st.download_button(
+            label="📥 Télécharger empereur_data.xlsx",
+            data=binary,
+            file_name="empereur_data.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
-    st.download_button(
-        label="📥 Télécharger empereur_data.xlsx",
-        data=binary,
-        file_name="empereur_data.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    st.markdown("---")
+    st.subheader("♻️ Réinitialiser toutes les données")
+
+    st.warning(
+        "⚠️ Cette action supprime **toutes** les données actuelles (Lifestyle, Force, Calisthénie, etc.) "
+        "et recrée un fichier vierge à partir du modèle."
     )
+
+    if st.button("🔴 Réinitialiser empereur_data.xlsx"):
+        if data_path.exists():
+            data_path.unlink()  # supprime le fichier de données
+            st.success(
+                "Toutes les données ont été réinitialisées. "
+                "La prochaine utilisation de l'app recréera un fichier vierge à partir du modèle."
+            )
+        else:
+            st.info("Aucun fichier de données à supprimer.")
+
 
 
 # ======================
