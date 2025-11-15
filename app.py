@@ -3,6 +3,8 @@ import pandas as pd
 from openpyxl import load_workbook
 from pathlib import Path
 import shutil
+import numpy as np
+from io import BytesIO
 
 # ======================
 # CONFIG
@@ -57,6 +59,246 @@ def get_next_lifestyle_day(ws):
 
 
 # ======================
+# CALCULS PYTHON : CHARGE, FATIGUE, SAH
+# ======================
+
+def compute_session_metrics(data_path: Path):
+    """
+    Recalcule la charge par séance (Force + Cali) et retourne :
+    - df_sessions : DataFrame avec colonnes ['Séance', 'Load']
+    """
+    # Force
+    try:
+        df_force = pd.read_excel(data_path, sheet_name="Données Force")
+    except Exception:
+        df_force = None
+
+    # Cali
+    try:
+        df_cali = pd.read_excel(data_path, sheet_name="Données Calisthénie")
+    except Exception:
+        df_cali = None
+
+    if df_force is None or "Séance" not in df_force.columns:
+        return None
+
+    df_f = df_force.copy()
+    df_f["Séance"] = pd.to_numeric(df_f["Séance"], errors="coerce")
+    df_f = df_f.dropna(subset=["Séance"]).sort_values("Séance")
+
+    def to_float(df, col):
+        return pd.to_numeric(df.get(col), errors="coerce")
+
+    squat_kg = to_float(df_f, "Squat (kg)")
+    squat_reps = to_float(df_f, "Squat (reps)")
+    fs_kg = to_float(df_f, "Front Squat (kg)")
+    fs_reps = to_float(df_f, "Front Squat (reps)")
+    bench_kg = to_float(df_f, "Bench (kg)")
+    bench_reps = to_float(df_f, "Bench (reps)")
+    dead_kg = to_float(df_f, "Deadlift (kg)")
+    dead_reps = to_float(df_f, "Deadlift (reps)")
+    ohp_kg = to_float(df_f, "OHP (kg)")
+    ohp_reps = to_float(df_f, "OHP (reps)")
+    row_kg = to_float(df_f, "Rowing (kg)")
+    row_reps = to_float(df_f, "Rowing (reps)")
+    pull_kg = to_float(df_f, "Traction Lestée (kg)")
+    pull_reps = to_float(df_f, "Traction Lestée (reps)")
+
+    vol_force = (
+        squat_kg * squat_reps +
+        fs_kg * fs_reps +
+        bench_kg * bench_reps +
+        dead_kg * dead_reps +
+        ohp_kg * ohp_reps +
+        row_kg * row_reps +
+        pull_kg * pull_reps
+    )
+
+    df_f["Load"] = vol_force
+
+    if df_cali is not None and "Séance" in df_cali.columns:
+        df_c = df_cali.copy()
+        df_c["Séance"] = pd.to_numeric(df_c["Séance"], errors="coerce")
+        df_c = df_c.dropna(subset=["Séance"])
+
+        hspu = to_float(df_c, "HSPU (reps)")
+        mu = to_float(df_c, "MU (reps)")
+        planche = to_float(df_c, "Planche (sec)")
+        t_lest = to_float(df_c, "Traction Lestée (kg)")
+        box = to_float(df_c, "Box Jump (cm)")
+
+        df_c["Calisth Volume (py)"] = (
+            hspu * 10 +
+            mu * 15 +
+            planche * 1 +
+            t_lest * 5 +
+            box * 2
+        )
+
+        df_merged = df_f.merge(
+            df_c[["Séance", "Calisth Volume (py)"]],
+            on="Séance",
+            how="left"
+        )
+        df_merged["Calisth Volume (py)"] = df_merged["Calisth Volume (py)"].fillna(0)
+        df_merged["Load"] = df_merged["Load"].fillna(0) + df_merged["Calisth Volume (py)"]
+        df_sessions = df_merged[["Séance", "Load"]]
+    else:
+        df_f["Load"] = df_f["Load"].fillna(0)
+        df_sessions = df_f[["Séance", "Load"]]
+
+    df_sessions = df_sessions[df_sessions["Load"] > 0]
+
+    if df_sessions.empty:
+        return None
+
+    return df_sessions.sort_values("Séance")
+
+
+def compute_fatigue_metrics(data_path: Path, window: int = 7):
+    """
+    Calcule Monotony et Strain sur les 'window' dernières séances.
+    """
+    df_sessions = compute_session_metrics(data_path)
+    if df_sessions is None or df_sessions.empty:
+        return None, None, None
+
+    loads = df_sessions["Load"].values
+    if len(loads) >= window:
+        loads_window = loads[-window:]
+    else:
+        loads_window = loads
+
+    mean_load = float(np.mean(loads_window))
+    std_load = float(np.std(loads_window)) if len(loads_window) > 1 else 0.0
+
+    if std_load == 0:
+        monotony = 0.0
+    else:
+        monotony = mean_load / std_load
+
+    strain = mean_load * monotony
+
+    return mean_load, monotony, strain
+
+
+def safe_nanmax(arr):
+    arr = np.array(arr, dtype=float)
+    if arr.size == 0 or np.isnan(arr).all():
+        return 0.0
+    return float(np.nanmax(arr))
+
+
+def compute_sah_score(data_path: Path):
+    """
+    Calcule un Score Athlète Hybride (SAH) simplifié basé sur :
+    - Meilleurs 1RM Squat / Bench / Deadlift (Epley Python)
+    - Meilleurs HSPU / MU / Traction lestée / Planche / Box jump
+    Retourne (SAH, dict détails)
+    """
+    try:
+        df_force = pd.read_excel(data_path, sheet_name="Données Force")
+    except Exception:
+        df_force = None
+
+    try:
+        df_cali = pd.read_excel(data_path, sheet_name="Données Calisthénie")
+    except Exception:
+        df_cali = None
+
+    if df_force is None:
+        return None, {}
+
+    df_f = df_force.copy()
+
+    def to_float(df, col):
+        return pd.to_numeric(df.get(col), errors="coerce")
+
+    squat_kg = to_float(df_f, "Squat (kg)")
+    squat_reps = to_float(df_f, "Squat (reps)")
+    bench_kg = to_float(df_f, "Bench (kg)")
+    bench_reps = to_float(df_f, "Bench (reps)")
+    dead_kg = to_float(df_f, "Deadlift (kg)")
+    dead_reps = to_float(df_f, "Deadlift (reps)")
+
+    def epley(kg, reps):
+        return kg * (1 + reps / 30.0)
+
+    squat_1rm = epley(squat_kg, squat_reps)
+    bench_1rm = epley(bench_kg, bench_reps)
+    dead_1rm = epley(dead_kg, dead_reps)
+
+    best_squat = safe_nanmax(squat_1rm)
+    best_bench = safe_nanmax(bench_1rm)
+    best_dead = safe_nanmax(dead_1rm)
+
+    sq_target = 220.0
+    bp_target = 160.0
+    dl_target = 260.0
+
+    str_squat = min(best_squat / sq_target, 1.2) if sq_target > 0 else 0
+    str_bench = min(best_bench / bp_target, 1.2) if bp_target > 0 else 0
+    str_dead = min(best_dead / dl_target, 1.2) if dl_target > 0 else 0
+
+    strength_score = np.mean([str_squat, str_bench, str_dead]) * 100.0
+
+    details = {
+        "Squat1RM": round(best_squat, 1),
+        "Bench1RM": round(best_bench, 1),
+        "Dead1RM": round(best_dead, 1),
+        "StrengthScore": round(strength_score, 1),
+    }
+
+    skill_score = None
+
+    if df_cali is not None:
+        df_c = df_cali.copy()
+        hspu = to_float(df_c, "HSPU (reps)")
+        mu = to_float(df_c, "MU (reps)")
+        planche = to_float(df_c, "Planche (sec)")
+        t_lest = to_float(df_c, "Traction Lestée (kg)")
+        box = to_float(df_c, "Box Jump (cm)")
+
+        best_hspu = safe_nanmax(hspu)
+        best_mu = safe_nanmax(mu)
+        best_planche = safe_nanmax(planche)
+        best_tlest = safe_nanmax(t_lest)
+        best_box = safe_nanmax(box)
+
+        details.update({
+            "HSPU": best_hspu,
+            "MU": best_mu,
+            "Planche_sec": best_planche,
+            "TractionLestee": best_tlest,
+            "BoxJump_cm": best_box,
+        })
+
+        hspu_target = 20.0
+        mu_target = 10.0
+        planche_target = 20.0
+        tlest_target = 80.0
+        box_target = 120.0
+
+        s_hspu = min(best_hspu / hspu_target, 1.2) if hspu_target > 0 else 0
+        s_mu = min(best_mu / mu_target, 1.2) if mu_target > 0 else 0
+        s_planche = min(best_planche / planche_target, 1.2) if planche_target > 0 else 0
+        s_tlest = min(best_tlest / tlest_target, 1.2) if tlest_target > 0 else 0
+        s_box = min(best_box / box_target, 1.2) if box_target > 0 else 0
+
+        skill_score = np.mean([s_hspu, s_mu, s_planche, s_tlest, s_box]) * 100.0
+        details["SkillScore"] = round(skill_score, 1)
+
+    if skill_score is not None:
+        sah = 0.5 * strength_score + 0.5 * skill_score
+    else:
+        sah = strength_score
+
+    sah = float(np.clip(sah, 0, 100))
+    details["SAH"] = round(sah, 1)
+    return sah, details
+
+
+# ======================
 # PAGES
 # ======================
 
@@ -81,7 +323,6 @@ def page_lifestyle():
         humeur = st.number_input("Humeur (0-10)", 0.0, 10.0, 7.0, 0.5)
 
     if st.button("💾 Enregistrer Lifestyle"):
-        # Trouver la première ligne vide
         row = None
         for r in range(2, ws.max_row + 2):
             if ws.cell(row=r, column=1).value is None:
@@ -90,7 +331,6 @@ def page_lifestyle():
         if row is None:
             row = ws.max_row + 1
 
-        # On convertit une bonne fois pour toutes en float
         s = float(sommeil)
         h = float(hydrat)
         n = float(nutri)
@@ -99,7 +339,6 @@ def page_lifestyle():
         e = float(energie)
         hm = float(humeur)
 
-        # Écriture brute
         ws.cell(row=row, column=1).value = jour
         ws.cell(row=row, column=2).value = s
         ws.cell(row=row, column=3).value = h
@@ -109,13 +348,15 @@ def page_lifestyle():
         ws.cell(row=row, column=7).value = e
         ws.cell(row=row, column=8).value = hm
 
-        # 🔥 Calcul Readiness en Python (0–100)
+        # Nommer la colonne 9 "Readiness" si pas déjà fait
+        if ws.cell(row=1, column=9).value in (None, ""):
+            ws.cell(row=1, column=9).value = "Readiness"
+
         score_pos = (s + h + n + c + e + hm) / 6.0
         score_stress = 10.0 - stv
-        readiness10 = 0.7 * score_pos + 0.3 * score_stress   # 0–10
-        readiness100 = round(readiness10 * 10)                # 0–100
+        readiness10 = 0.7 * score_pos + 0.3 * score_stress
+        readiness100 = round(readiness10 * 10)
 
-        # Colonne 9 = Readiness
         ws.cell(row=row, column=9).value = readiness100
 
         wb.save(data_path)
@@ -278,7 +519,6 @@ def page_dashboards():
 
     wb, data_path = get_excel_file()
 
-    # ====== LECTURE DONNÉES FORCE ======
     try:
         df_force = pd.read_excel(data_path, sheet_name="Données Force")
     except Exception as e:
@@ -291,26 +531,24 @@ def page_dashboards():
 
     df_f = df_force.copy().sort_values("Séance")
 
-    # On s'assure que kg & reps sont numériques
-    def to_float(col):
-        return pd.to_numeric(df_f.get(col), errors="coerce")
+    def to_float(df, col):
+        return pd.to_numeric(df.get(col), errors="coerce")
 
-    squat_kg = to_float("Squat (kg)")
-    squat_reps = to_float("Squat (reps)")
-    bench_kg = to_float("Bench (kg)")
-    bench_reps = to_float("Bench (reps)")
-    dead_kg = to_float("Deadlift (kg)")
-    dead_reps = to_float("Deadlift (reps)")
-    fs_kg = to_float("Front Squat (kg)")
-    fs_reps = to_float("Front Squat (reps)")
-    ohp_kg = to_float("OHP (kg)")
-    ohp_reps = to_float("OHP (reps)")
-    row_kg = to_float("Rowing (kg)")
-    row_reps = to_float("Rowing (reps)")
-    pull_kg = to_float("Traction Lestée (kg)")
-    pull_reps = to_float("Traction Lestée (reps)")
+    squat_kg = to_float(df_f, "Squat (kg)")
+    squat_reps = to_float(df_f, "Squat (reps)")
+    bench_kg = to_float(df_f, "Bench (kg)")
+    bench_reps = to_float(df_f, "Bench (reps)")
+    dead_kg = to_float(df_f, "Deadlift (kg)")
+    dead_reps = to_float(df_f, "Deadlift (reps)")
+    fs_kg = to_float(df_f, "Front Squat (kg)")
+    fs_reps = to_float(df_f, "Front Squat (reps)")
+    ohp_kg = to_float(df_f, "OHP (kg)")
+    ohp_reps = to_float(df_f, "OHP (reps)")
+    row_kg = to_float(df_f, "Rowing (kg)")
+    row_reps = to_float(df_f, "Rowing (reps)")
+    pull_kg = to_float(df_f, "Traction Lestée (kg)")
+    pull_reps = to_float(df_f, "Traction Lestée (reps)")
 
-    # ====== 1RM EPLEY recalculé en Python ======
     def epley(kg, reps):
         return kg * (1 + reps / 30.0)
 
@@ -318,7 +556,6 @@ def page_dashboards():
     df_f["Bench 1RM (py)"] = epley(bench_kg, bench_reps)
     df_f["Deadlift 1RM (py)"] = epley(dead_kg, dead_reps)
 
-    # ====== VOLUME SESSION (kg * reps) recalculé ======
     vol_cols = [
         squat_kg * squat_reps,
         fs_kg * fs_reps,
@@ -330,7 +567,6 @@ def page_dashboards():
     ]
     df_f["Session Volume (py)"] = sum(vol_cols)
 
-    # ====== GRAPHIQUE VOLUME ======
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("Volume par séance (calcul Python)")
@@ -339,7 +575,6 @@ def page_dashboards():
         else:
             st.info("Aucun volume calculable (remplis au moins un exo avec kg & reps).")
 
-    # ====== GRAPHIQUE 1RM ======
     with col2:
         st.subheader("1RM estimées Squat / Bench / Deadlift (Epley Python)")
         cols_1rm = ["Squat 1RM (py)", "Bench 1RM (py)", "Deadlift 1RM (py)"]
@@ -350,7 +585,6 @@ def page_dashboards():
 
     st.markdown("---")
 
-    # ====== CALISTHÉNIE ======
     try:
         df_cali = pd.read_excel(data_path, sheet_name="Données Calisthénie")
     except Exception as e:
@@ -363,14 +597,12 @@ def page_dashboards():
 
     df_c = df_cali.copy().sort_values("Séance")
 
-    # On recalcule un volume cali simple si besoin
     hspu = pd.to_numeric(df_c.get("HSPU (reps)"), errors="coerce")
     mu = pd.to_numeric(df_c.get("MU (reps)"), errors="coerce")
     planche = pd.to_numeric(df_c.get("Planche (sec)"), errors="coerce")
     t_lest = pd.to_numeric(df_c.get("Traction Lestée (kg)"), errors="coerce")
     box = pd.to_numeric(df_c.get("Box Jump (cm)"), errors="coerce")
 
-    # pondérations arbitraires mais cohérentes avec ton système
     df_c["Calisth Volume (py)"] = (
         hspu * 10 +
         mu * 15 +
@@ -386,66 +618,136 @@ def page_dashboards():
         st.info("Aucun volume calisthénie calculable pour l’instant.")
 
 
+def page_pr_sah():
+    st.header("🏆 PR & Score Athlète Hybride")
+
+    wb, data_path = get_excel_file(data_only=True)
+
+    try:
+        df_pr = pd.read_excel(data_path, sheet_name="PR Automatiques")
+        st.subheader("PR Automatiques (Excel)")
+        st.dataframe(df_pr)
+    except Exception as e:
+        st.warning(f"Erreur lecture PR Automatiques : {e}")
+
+    sah, details = compute_sah_score(data_path)
+    st.subheader("Score Athlète Hybride (calcul Python)")
+    if sah is not None:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("SAH", value=round(sah, 1))
+        with col2:
+            st.write("Détails composantes :")
+            st.json(details)
+    else:
+        st.info("Pas encore assez de données (force / calisthénie) pour calculer un SAH.")
+
+
+def page_planning():
+    st.header("📅 Planning – Plan Annuel & Mésocycles")
+
+    wb, data_path = get_excel_file()
+
+    col1, col2 = st.columns(2)
+    try:
+        df_annuel = pd.read_excel(data_path, sheet_name="Plan Annuel")
+        with col1:
+            st.subheader("Plan Annuel")
+            st.dataframe(df_annuel)
+    except Exception as e:
+        st.warning(f"Erreur lecture Plan Annuel : {e}")
+
+    try:
+        df_meso = pd.read_excel(data_path, sheet_name="Mésocycle-Type")
+        with col2:
+            st.subheader("Mésocycle-Type")
+            st.dataframe(df_meso)
+    except Exception as e:
+        st.warning(f"Erreur lecture Mésocycle-Type : {e}")
+
+    st.markdown("---")
+    try:
+        df_auto_meso = pd.read_excel(data_path, sheet_name="Auto-Mesocycles")
+        st.subheader("Auto-Mesocycles")
+        st.dataframe(df_auto_meso)
+    except Exception as e:
+        st.warning(f"Erreur lecture Auto-Mesocycles : {e}")
+
+
 def page_reco_global():
     st.header("🧠 Synthèse & Recommandations globales")
 
     wb, data_path = get_excel_file(data_only=True)
 
+    # READINESS MOYEN
     try:
-        auto = wb["Auto-Séance"]
-        pday = wb["Plan Jour Auto"]
-        sah_ws = wb["Score Athlète Hybride"]
-        life = wb["Lifestyle"]
-        fat = wb["Fatigue & Readiness"]
+        df_life = pd.read_excel(data_path, sheet_name="Lifestyle")
+        if "Readiness" in df_life.columns:
+            readiness_col = "Readiness"
+        elif df_life.shape[1] >= 9:
+            readiness_col = df_life.columns[8]
+        else:
+            readiness_col = None
 
-        readiness_vals = [life.cell(row=r, column=9).value for r in range(2, life.max_row + 1)
-                          if isinstance(life.cell(row=r, column=9).value, (int, float))]
-        readiness_moy = sum(readiness_vals) / len(readiness_vals) if readiness_vals else None
+        if readiness_col:
+            vals = pd.to_numeric(df_life[readiness_col], errors="coerce").dropna()
+            readiness_moy = float(vals.mean()) if not vals.empty else None
+        else:
+            readiness_moy = None
+    except Exception:
+        readiness_moy = None
 
-        strain_vals = [fat.cell(row=r, column=6).value for r in range(2, fat.max_row + 1)
-                       if isinstance(fat.cell(row=r, column=6).value, (int, float))]
-        fatigue_moy = sum(strain_vals) / len(strain_vals) if strain_vals else None
+    mean_load, monotony, strain = compute_fatigue_metrics(data_path)
+    sah, sah_details = compute_sah_score(data_path)
 
-        sah = sah_ws["F2"].value
-        reco_auto = auto["C2"].value
-        reco_pday = pday["D2"].value
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric(
+            "Readiness moyen",
+            value=round(readiness_moy, 1) if readiness_moy is not None else "N/A"
+        )
+        if mean_load is not None:
+            st.metric("Charge moyenne (7 dernières séances)", value=int(mean_load))
+        else:
+            st.metric("Charge moyenne", value="N/A")
 
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric("Readiness moyen", value=round(readiness_moy, 1) if readiness_moy is not None else "N/A")
-            st.metric("Fatigue moyenne (Strain)", value=round(fatigue_moy, 1) if fatigue_moy is not None else "N/A")
-        with col2:
-            st.metric("Score SAH", value=sah if sah is not None else "N/A")
+    with col2:
+        if monotony is not None:
+            st.metric("Monotony", value=round(monotony, 2))
+        else:
+            st.metric("Monotony", value="N/A")
+        if strain is not None:
+            st.metric("Strain", value=int(strain))
+        else:
+            st.metric("Strain", value="N/A")
 
-        st.markdown("---")
-        st.subheader("Séance recommandée")
-        st.write(f"**Auto-Séance** : {reco_auto if reco_auto else 'N/A'}")
-        st.write(f"**Plan Jour Auto** : {reco_pday if reco_pday else 'N/A'}")
+    st.markdown("---")
+    st.subheader("Score Athlète Hybride (Python)")
+    if sah is not None:
+        st.metric("SAH", value=round(sah, 1))
+        with st.expander("Détails SAH"):
+            st.json(sah_details)
+    else:
+        st.info("Pas encore assez de données pour calculer un SAH.")
 
-    except Exception as e:
-        st.error(f"Erreur lors de la lecture des recommandations : {e}")
+    st.markdown("---")
+    st.subheader("Séance recommandée (logique à définir)")
+    st.write("🔜 Prochaine étape : lier Readiness + Strain pour proposer automatiquement Heavy / Volume / Skill / Rest.")
 
-
-# ======================
-# MAIN
-# ======================
-from io import BytesIO
 
 def page_export_debug():
     st.header("📥 Export & Debug des données Empereur")
 
-    # 1) Aperçu Lifestyle
+    _, data_path = get_excel_file()
+
     st.subheader("Dernières entrées Lifestyle")
     try:
-        _, data_path = get_excel_file()
         df_life = pd.read_excel(data_path, sheet_name="Lifestyle")
         st.dataframe(df_life.tail(10))
     except Exception as e:
         st.warning(f"Impossible de lire la feuille Lifestyle : {e}")
 
     st.markdown("---")
-
-    # 2) Aperçu Données Force
     st.subheader("Dernières entrées Séances Force")
     try:
         df_force = pd.read_excel(data_path, sheet_name="Données Force")
@@ -454,13 +756,11 @@ def page_export_debug():
         st.warning(f"Impossible de lire la feuille Données Force : {e}")
 
     st.markdown("---")
-
-    # 3) Téléchargement du fichier empereur_data.xlsx
     st.subheader("Télécharger le fichier de données complet")
 
     data_path = Path(DATA_FILE)
     if not data_path.exists():
-        st.info("Aucun fichier empereur_data.xlsx trouvé pour l'instant (enregistre au moins une donnée).")
+        st.info("Aucun fichier empereur_data.xlsx trouvé pour l'instant (enregistre d'abord des données).")
         return
 
     with open(data_path, "rb") as f:
@@ -473,6 +773,11 @@ def page_export_debug():
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
+
+# ======================
+# MAIN
+# ======================
+
 PAGES = {
     "Lifestyle": page_lifestyle,
     "Séance Force": page_force,
@@ -484,6 +789,7 @@ PAGES = {
     "Synthèse & Recos Globales": page_reco_global,
     "Export / Debug": page_export_debug,
 }
+
 
 def main():
     st.set_page_config(page_title="Système Empereur", layout="wide")
