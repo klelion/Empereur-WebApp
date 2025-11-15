@@ -4,7 +4,6 @@ from openpyxl import load_workbook
 from pathlib import Path
 import shutil
 import numpy as np
-from io import BytesIO
 
 # ======================
 # CONFIG
@@ -59,13 +58,17 @@ def get_next_lifestyle_day(ws):
 
 
 # ======================
-# CALCULS PYTHON : CHARGE, FATIGUE, SAH
+# CALCULS PYTHON : CHARGE, FATIGUE, SAH V2, AUTO-SEANCE
 # ======================
+
+def _to_float(df, col):
+    return pd.to_numeric(df.get(col), errors="coerce")
+
 
 def compute_session_metrics(data_path: Path):
     """
     Recalcule la charge par séance (Force + Cali) et retourne :
-    - df_sessions : DataFrame avec colonnes ['Séance', 'Load']
+    DataFrame ['Séance', 'Load', 'Load_Force', 'Load_Cali']
     """
     # Force
     try:
@@ -86,23 +89,20 @@ def compute_session_metrics(data_path: Path):
     df_f["Séance"] = pd.to_numeric(df_f["Séance"], errors="coerce")
     df_f = df_f.dropna(subset=["Séance"]).sort_values("Séance")
 
-    def to_float(df, col):
-        return pd.to_numeric(df.get(col), errors="coerce")
-
-    squat_kg = to_float(df_f, "Squat (kg)")
-    squat_reps = to_float(df_f, "Squat (reps)")
-    fs_kg = to_float(df_f, "Front Squat (kg)")
-    fs_reps = to_float(df_f, "Front Squat (reps)")
-    bench_kg = to_float(df_f, "Bench (kg)")
-    bench_reps = to_float(df_f, "Bench (reps)")
-    dead_kg = to_float(df_f, "Deadlift (kg)")
-    dead_reps = to_float(df_f, "Deadlift (reps)")
-    ohp_kg = to_float(df_f, "OHP (kg)")
-    ohp_reps = to_float(df_f, "OHP (reps)")
-    row_kg = to_float(df_f, "Rowing (kg)")
-    row_reps = to_float(df_f, "Rowing (reps)")
-    pull_kg = to_float(df_f, "Traction Lestée (kg)")
-    pull_reps = to_float(df_f, "Traction Lestée (reps)")
+    squat_kg = _to_float(df_f, "Squat (kg)")
+    squat_reps = _to_float(df_f, "Squat (reps)")
+    fs_kg = _to_float(df_f, "Front Squat (kg)")
+    fs_reps = _to_float(df_f, "Front Squat (reps)")
+    bench_kg = _to_float(df_f, "Bench (kg)")
+    bench_reps = _to_float(df_f, "Bench (reps)")
+    dead_kg = _to_float(df_f, "Deadlift (kg)")
+    dead_reps = _to_float(df_f, "Deadlift (reps)")
+    ohp_kg = _to_float(df_f, "OHP (kg)")
+    ohp_reps = _to_float(df_f, "OHP (reps)")
+    row_kg = _to_float(df_f, "Rowing (kg)")
+    row_reps = _to_float(df_f, "Rowing (reps)")
+    pull_kg = _to_float(df_f, "Traction Lestée (kg)")
+    pull_reps = _to_float(df_f, "Traction Lestée (reps)")
 
     vol_force = (
         squat_kg * squat_reps +
@@ -114,38 +114,41 @@ def compute_session_metrics(data_path: Path):
         pull_kg * pull_reps
     )
 
-    df_f["Load"] = vol_force
+    df_f["Load_Force"] = vol_force.fillna(0)
 
+    # Cali
+    load_cali_series = None
     if df_cali is not None and "Séance" in df_cali.columns:
         df_c = df_cali.copy()
         df_c["Séance"] = pd.to_numeric(df_c["Séance"], errors="coerce")
         df_c = df_c.dropna(subset=["Séance"])
 
-        hspu = to_float(df_c, "HSPU (reps)")
-        mu = to_float(df_c, "MU (reps)")
-        planche = to_float(df_c, "Planche (sec)")
-        t_lest = to_float(df_c, "Traction Lestée (kg)")
-        box = to_float(df_c, "Box Jump (cm)")
+        hspu = _to_float(df_c, "HSPU (reps)")
+        mu = _to_float(df_c, "MU (reps)")
+        planche = _to_float(df_c, "Planche (sec)")
+        t_lest = _to_float(df_c, "Traction Lestée (kg)")
+        box = _to_float(df_c, "Box Jump (cm)")
 
-        df_c["Calisth Volume (py)"] = (
+        df_c["Load_Cali"] = (
             hspu * 10 +
             mu * 15 +
             planche * 1 +
             t_lest * 5 +
             box * 2
-        )
+        ).fillna(0)
 
         df_merged = df_f.merge(
-            df_c[["Séance", "Calisth Volume (py)"]],
+            df_c[["Séance", "Load_Cali"]],
             on="Séance",
             how="left"
         )
-        df_merged["Calisth Volume (py)"] = df_merged["Calisth Volume (py)"].fillna(0)
-        df_merged["Load"] = df_merged["Load"].fillna(0) + df_merged["Calisth Volume (py)"]
-        df_sessions = df_merged[["Séance", "Load"]]
+        df_merged["Load_Cali"] = df_merged["Load_Cali"].fillna(0)
+        df_merged["Load"] = df_merged["Load_Force"] + df_merged["Load_Cali"]
+        df_sessions = df_merged[["Séance", "Load", "Load_Force", "Load_Cali"]]
     else:
-        df_f["Load"] = df_f["Load"].fillna(0)
-        df_sessions = df_f[["Séance", "Load"]]
+        df_f["Load_Cali"] = 0.0
+        df_f["Load"] = df_f["Load_Force"]
+        df_sessions = df_f[["Séance", "Load", "Load_Force", "Load_Cali"]]
 
     df_sessions = df_sessions[df_sessions["Load"] > 0]
 
@@ -157,7 +160,7 @@ def compute_session_metrics(data_path: Path):
 
 def compute_fatigue_metrics(data_path: Path, window: int = 7):
     """
-    Calcule Monotony et Strain sur les 'window' dernières séances.
+    Calcule Charge moyenne, Monotony et Strain sur les 'window' dernières séances.
     """
     df_sessions = compute_session_metrics(data_path)
     if df_sessions is None or df_sessions.empty:
@@ -178,7 +181,6 @@ def compute_fatigue_metrics(data_path: Path, window: int = 7):
         monotony = mean_load / std_load
 
     strain = mean_load * monotony
-
     return mean_load, monotony, strain
 
 
@@ -189,12 +191,13 @@ def safe_nanmax(arr):
     return float(np.nanmax(arr))
 
 
-def compute_sah_score(data_path: Path):
+def compute_sah_v2(data_path: Path):
     """
-    Calcule un Score Athlète Hybride (SAH) simplifié basé sur :
-    - Meilleurs 1RM Squat / Bench / Deadlift (Epley Python)
-    - Meilleurs HSPU / MU / Traction lestée / Planche / Box jump
-    Retourne (SAH, dict détails)
+    SAH V2 – Score Athlète Hybride 0–100 basé sur :
+    - StrengthIndex : Squat / Bench / Deadlift
+    - SkillIndex    : HSPU / MU / Planche / Traction lestée
+    - PowerIndex    : Box jump + charge calisthénique
+    Poids : Strength 40%, Skill 40%, Power 20%.
     """
     try:
         df_force = pd.read_excel(data_path, sheet_name="Données Force")
@@ -211,15 +214,12 @@ def compute_sah_score(data_path: Path):
 
     df_f = df_force.copy()
 
-    def to_float(df, col):
-        return pd.to_numeric(df.get(col), errors="coerce")
-
-    squat_kg = to_float(df_f, "Squat (kg)")
-    squat_reps = to_float(df_f, "Squat (reps)")
-    bench_kg = to_float(df_f, "Bench (kg)")
-    bench_reps = to_float(df_f, "Bench (reps)")
-    dead_kg = to_float(df_f, "Deadlift (kg)")
-    dead_reps = to_float(df_f, "Deadlift (reps)")
+    squat_kg = _to_float(df_f, "Squat (kg)")
+    squat_reps = _to_float(df_f, "Squat (reps)")
+    bench_kg = _to_float(df_f, "Bench (kg)")
+    bench_reps = _to_float(df_f, "Bench (reps)")
+    dead_kg = _to_float(df_f, "Deadlift (kg)")
+    dead_reps = _to_float(df_f, "Deadlift (reps)")
 
     def epley(kg, reps):
         return kg * (1 + reps / 30.0)
@@ -232,32 +232,34 @@ def compute_sah_score(data_path: Path):
     best_bench = safe_nanmax(bench_1rm)
     best_dead = safe_nanmax(dead_1rm)
 
+    # Cibles "empereur hybride" (à affiner à terme)
     sq_target = 220.0
     bp_target = 160.0
     dl_target = 260.0
 
-    str_squat = min(best_squat / sq_target, 1.2) if sq_target > 0 else 0
-    str_bench = min(best_bench / bp_target, 1.2) if bp_target > 0 else 0
-    str_dead = min(best_dead / dl_target, 1.2) if dl_target > 0 else 0
+    str_squat = min(best_squat / sq_target, 1.3) if sq_target > 0 else 0
+    str_bench = min(best_bench / bp_target, 1.3) if bp_target > 0 else 0
+    str_dead = min(best_dead / dl_target, 1.3) if dl_target > 0 else 0
 
-    strength_score = np.mean([str_squat, str_bench, str_dead]) * 100.0
+    strength_index = float(np.mean([str_squat, str_bench, str_dead]) * 100.0)
 
     details = {
         "Squat1RM": round(best_squat, 1),
         "Bench1RM": round(best_bench, 1),
         "Dead1RM": round(best_dead, 1),
-        "StrengthScore": round(strength_score, 1),
+        "StrengthIndex": round(strength_index, 1),
     }
 
-    skill_score = None
+    skill_index = 0.0
+    power_index = 0.0
 
     if df_cali is not None:
         df_c = df_cali.copy()
-        hspu = to_float(df_c, "HSPU (reps)")
-        mu = to_float(df_c, "MU (reps)")
-        planche = to_float(df_c, "Planche (sec)")
-        t_lest = to_float(df_c, "Traction Lestée (kg)")
-        box = to_float(df_c, "Box Jump (cm)")
+        hspu = _to_float(df_c, "HSPU (reps)")
+        mu = _to_float(df_c, "MU (reps)")
+        planche = _to_float(df_c, "Planche (sec)")
+        t_lest = _to_float(df_c, "Traction Lestée (kg)")
+        box = _to_float(df_c, "Box Jump (cm)")
 
         best_hspu = safe_nanmax(hspu)
         best_mu = safe_nanmax(mu)
@@ -273,29 +275,304 @@ def compute_sah_score(data_path: Path):
             "BoxJump_cm": best_box,
         })
 
+        # Cibles calisthéniques
         hspu_target = 20.0
         mu_target = 10.0
-        planche_target = 20.0
-        tlest_target = 80.0
-        box_target = 120.0
+        planche_target = 20.0   # secondes
+        tlest_target = 80.0     # +80kg
+        box_target = 120.0      # cm
 
-        s_hspu = min(best_hspu / hspu_target, 1.2) if hspu_target > 0 else 0
-        s_mu = min(best_mu / mu_target, 1.2) if mu_target > 0 else 0
-        s_planche = min(best_planche / planche_target, 1.2) if planche_target > 0 else 0
-        s_tlest = min(best_tlest / tlest_target, 1.2) if tlest_target > 0 else 0
-        s_box = min(best_box / box_target, 1.2) if box_target > 0 else 0
+        s_hspu = min(best_hspu / hspu_target, 1.3) if hspu_target > 0 else 0
+        s_mu = min(best_mu / mu_target, 1.3) if mu_target > 0 else 0
+        s_planche = min(best_planche / planche_target, 1.3) if planche_target > 0 else 0
+        s_tlest = min(best_tlest / tlest_target, 1.3) if tlest_target > 0 else 0
+        s_box_skill = min(best_box / box_target, 1.3) if box_target > 0 else 0
 
-        skill_score = np.mean([s_hspu, s_mu, s_planche, s_tlest, s_box]) * 100.0
-        details["SkillScore"] = round(skill_score, 1)
+        # Skill = contrôle + complexité
+        skill_index = float(np.mean([s_hspu, s_mu, s_planche, s_tlest]) * 100.0)
+        # Power = box jump + traction lestée
+        power_index = float(np.mean([s_tlest, s_box_skill]) * 100.0)
 
-    if skill_score is not None:
-        sah = 0.5 * strength_score + 0.5 * skill_score
+        details["SkillIndex"] = round(skill_index, 1)
+        details["PowerIndex"] = round(power_index, 1)
+
+    # Pondération SAH V2
+    sah_components = []
+    weights = []
+
+    sah_components.append(strength_index)
+    weights.append(0.4)
+
+    sah_components.append(skill_index)
+    weights.append(0.4)
+
+    sah_components.append(power_index)
+    weights.append(0.2)
+
+    sah_v2 = float(np.average(sah_components, weights=weights))
+    sah_v2 = float(np.clip(sah_v2, 0, 100))
+
+    details["SAH_V2"] = round(sah_v2, 1)
+    return sah_v2, details
+
+
+def classify_skill_level(skill_index: float):
+    """
+    Classe le niveau Skill en catégories.
+    """
+    if skill_index is None:
+        return "Inconnu"
+    if skill_index < 30:
+        return "Débutant"
+    if skill_index < 60:
+        return "Intermédiaire"
+    if skill_index < 85:
+        return "Avancé"
+    return "Élite"
+
+
+def get_latest_readiness(data_path: Path):
+    try:
+        df_life = pd.read_excel(data_path, sheet_name="Lifestyle")
+    except Exception:
+        return None
+
+    if "Readiness" in df_life.columns:
+        col = "Readiness"
+    elif df_life.shape[1] >= 9:
+        col = df_life.columns[8]
     else:
-        sah = strength_score
+        return None
 
-    sah = float(np.clip(sah, 0, 100))
-    details["SAH"] = round(sah, 1)
-    return sah, details
+    vals = pd.to_numeric(df_life[col], errors="coerce").dropna()
+    if vals.empty:
+        return None
+    return float(vals.iloc[-1])
+
+
+def get_last_session_info(data_path: Path):
+    df_sessions = compute_session_metrics(data_path)
+    if df_sessions is None or df_sessions.empty:
+        return None
+
+    last = df_sessions.iloc[-1]
+    load = float(last["Load"])
+    load_force = float(last["Load_Force"])
+    load_cali = float(last["Load_Cali"])
+
+    if load_force > load_cali * 1.3:
+        last_type = "Force"
+    elif load_cali > load_force * 1.3:
+        last_type = "Calisthénie"
+    else:
+        last_type = "Mixte"
+
+    return {
+        "Séance": int(last["Séance"]),
+        "Load": load,
+        "Load_Force": load_force,
+        "Load_Cali": load_cali,
+        "Type": last_type,
+    }
+
+
+def compute_auto_seance_recommendation(
+    data_path: Path,
+    block_focus: str
+):
+    """
+    Moteur Auto-Séance intelligent.
+    Utilise Readiness, Strain, Skill, dernière séance, charge 7j.
+    Retourne un dict avec :
+    - session_type
+    - focus
+    - intensity
+    - volume_mod
+    - rpe_target
+    - notes
+    - structure_suggestion (liste de points)
+    """
+    readiness = get_latest_readiness(data_path)
+    mean_load, monotony, strain = compute_fatigue_metrics(data_path)
+    sah_v2, details = compute_sah_v2(data_path)
+    last_info = get_last_session_info(data_path)
+
+    skill_index = details.get("SkillIndex", 0.0)
+    strength_index = details.get("StrengthIndex", 0.0)
+    skill_level = classify_skill_level(skill_index)
+
+    # Défauts si pas de données
+    if readiness is None:
+        readiness = 50.0
+    if mean_load is None:
+        mean_load = 0.0
+    if monotony is None:
+        monotony = 0.0
+    if strain is None:
+        strain = 0.0
+
+    # Catégorisation readiness
+    if readiness >= 70:
+        readiness_zone = "High"
+    elif readiness >= 40:
+        readiness_zone = "Medium"
+    else:
+        readiness_zone = "Low"
+
+    # Catégorisation strain
+    if strain >= 25000:
+        strain_zone = "High"
+    elif strain >= 10000:
+        strain_zone = "Medium"
+    else:
+        strain_zone = "Low"
+
+    # Logique de base : type de séance en fonction de readiness / strain / block
+    session_type = ""
+    focus = ""
+    intensity = ""
+    volume_mod = ""
+    rpe_target = ""
+    notes = []
+    structure = []
+
+    # Pour simplifier, on mappe block_focus en priorités
+    if block_focus == "Force maximale":
+        primary = "Force"
+    elif block_focus == "Hypertrophie / Volume":
+        primary = "Volume"
+    elif block_focus == "Skill / Calisthénie":
+        primary = "Skill"
+    elif block_focus == "Puissance / Explosivité":
+        primary = "Power"
+    else:  # Déload / Gestion fatigue
+        primary = "Deload"
+
+    # Ajustement spécifique si très fatigué
+    if readiness_zone == "Low" or strain_zone == "High":
+        # Fatigue importante : on privilégie Recovery / Skill propre
+        if primary == "Deload":
+            session_type = "Recovery / Off"
+            focus = "Récupération globale"
+            intensity = "Très basse"
+            volume_mod = "20–40% du volume habituel"
+            rpe_target = "RPE 5–6 max"
+            notes.append("Fatigue ou strain élevés : privilégier la récupération active.")
+            structure = [
+                "20–30 min mobilité totale (hanches, épaules, colonne)",
+                "10–20 min marche ou cardio très léger",
+                "Travail technique très propre : handstand hold, supports, respiration",
+                "Sauna / bain chaud / automassage si possible"
+            ]
+        else:
+            session_type = "Skill / Recovery"
+            focus = "Technique + Calisthénie propre + mobilité"
+            intensity = "Basse à modérée"
+            volume_mod = "40–60% du volume habituel"
+            rpe_target = "RPE 6–7"
+            notes.append("Readiness bas ou strain élevé : on garde la fréquence mais on baisse l'impact.")
+            structure = [
+                "Bloc skill : HSPU, MU, planche (progrès techniques, pas de grind)",
+                "Volume traction / push modéré, loin de l'échec",
+                "Core & gainage (planche, hollow, arch)",
+                "Long travail de stretching actif / PNF en fin de séance"
+            ]
+    else:
+        # Readiness OK / Strain gérable → on regarde le focus
+        if primary == "Force":
+            session_type = "Heavy Strength"
+            focus = "Force lourde (bas du corps ou haut, selon rotation)"
+            intensity = "Élevée"
+            volume_mod = "70–90% du volume habituel"
+            rpe_target = "RPE 8–9 sur les principaux mouvements"
+            notes.append("Tu peux pousser lourd sur 1–3 lifts principaux.")
+            structure = [
+                "1–2 mouvements principaux en 3–5 séries lourdes (3–6 reps)",
+                "2–3 accessoires lourds ou modérés (6–10 reps)",
+                "Un peu de skill en fin si énergie (HSPU / MU)",
+                "Finir par un travail léger de mobilité / respiration"
+            ]
+        elif primary == "Volume":
+            session_type = "Hypertrophie / Volume"
+            focus = "Accumulation de volume contrôlé"
+            intensity = "Modérée"
+            volume_mod = "90–110% du volume habituel"
+            rpe_target = "RPE 7–8"
+            notes.append("Objectif : congestion, volume, mais sans casser le système nerveux.")
+            structure = [
+                "2 mouvements de base (squat / bench / row / dips...) en 4×8–12",
+                "3–4 exercices d'iso / machines (12–20 reps)",
+                "Optionnel : finisher métabolique (farmer walk + burpees, etc.)",
+                "Étirer les groupes très travaillés"
+            ]
+        elif primary == "Skill":
+            session_type = "Skill Calisthénie"
+            focus = "Maîtrise technique + progression sur HSPU / MU / planche"
+            intensity = "Modérée"
+            volume_mod = "60–80% du volume habituel"
+            rpe_target = "RPE 6–8 (jamais à l'échec nerveux sur skill)"
+            notes.append(f"Niveau skill actuel : {skill_level}. On consolide la technique.")
+            structure = [
+                "Bloc 1 : MU (explosifs, bandés si besoin, 3–5 reps par série)",
+                "Bloc 2 : HSPU / handstand (négatives, holds, partiels)",
+                "Bloc 3 : Planche / front lever (progressions tenues propres)",
+                "Finir par du tirage / push plus simple (tractions, dips, pompes)",
+                "Mobility shoulders + poignets"
+            ]
+        elif primary == "Power":
+            session_type = "Puissance / Explosivité"
+            focus = "Sauts, vitesse, intention explosive"
+            intensity = "Élevée mais volume limité"
+            volume_mod = "50–70% volume muscu, 100% intensité sur l'explosivité"
+            rpe_target = "RPE 7–8 sur explosif, pas d'échec"
+            notes.append("Objectif : système nerveux rapide, pas cramé.")
+            structure = [
+                "Sauts (box jumps, bounds, sauts horizontaux, 3–5 reps par série)",
+                "Mouvements olympiques techniques si tu en utilises (high pull, etc.)",
+                "Sprints courts ou hill sprints (si contexte adapté)",
+                "Un peu de force submax (70–80% 1RM, mouvement rapide)",
+                "Finir par mobilité hanches / chevilles"
+            ]
+        else:  # Deload
+            session_type = "Deload intelligent"
+            focus = "Réduction de charge, maintien technique"
+            intensity = "Basse à modérée"
+            volume_mod = "40–60% du volume habituel"
+            rpe_target = "RPE 6–7"
+            notes.append("Bloc orienté gestion fatigue / décharge.")
+            structure = [
+                "Même structure de séance qu'habituel mais -40% charge / volume",
+                "Travail technique plus propre (tempo contrôlé, pauses)",
+                "Beaucoup de mobilité / respiration en fin",
+                "Sleep / nutrition prioritaires"
+            ]
+
+    # Ajustement léger selon dernière séance
+    if last_info is not None:
+        if last_info["Type"] == "Force" and "Heavy" in session_type:
+            notes.append("Dernière séance déjà très force → surveille tes sensations sur les premiers sets.")
+        if last_info["Type"] == "Calisthénie" and "Skill" in session_type:
+            notes.append("Tu peux recycler certains patterns de la dernière séance en version plus propre.")
+
+    return {
+        "readiness": readiness,
+        "mean_load": mean_load,
+        "monotony": monotony,
+        "strain": strain,
+        "sah_v2": sah_v2,
+        "strength_index": strength_index,
+        "skill_index": skill_index,
+        "power_index": details.get("PowerIndex", 0.0),
+        "skill_level": skill_level,
+        "last_session": last_info,
+        "session_type": session_type,
+        "focus": focus,
+        "intensity": intensity,
+        "volume_mod": volume_mod,
+        "rpe_target": rpe_target,
+        "notes": notes,
+        "structure_suggestion": structure,
+    }
 
 
 # ======================
@@ -531,23 +808,20 @@ def page_dashboards():
 
     df_f = df_force.copy().sort_values("Séance")
 
-    def to_float(df, col):
-        return pd.to_numeric(df.get(col), errors="coerce")
-
-    squat_kg = to_float(df_f, "Squat (kg)")
-    squat_reps = to_float(df_f, "Squat (reps)")
-    bench_kg = to_float(df_f, "Bench (kg)")
-    bench_reps = to_float(df_f, "Bench (reps)")
-    dead_kg = to_float(df_f, "Deadlift (kg)")
-    dead_reps = to_float(df_f, "Deadlift (reps)")
-    fs_kg = to_float(df_f, "Front Squat (kg)")
-    fs_reps = to_float(df_f, "Front Squat (reps)")
-    ohp_kg = to_float(df_f, "OHP (kg)")
-    ohp_reps = to_float(df_f, "OHP (reps)")
-    row_kg = to_float(df_f, "Rowing (kg)")
-    row_reps = to_float(df_f, "Rowing (reps)")
-    pull_kg = to_float(df_f, "Traction Lestée (kg)")
-    pull_reps = to_float(df_f, "Traction Lestée (reps)")
+    squat_kg = _to_float(df_f, "Squat (kg)")
+    squat_reps = _to_float(df_f, "Squat (reps)")
+    bench_kg = _to_float(df_f, "Bench (kg)")
+    bench_reps = _to_float(df_f, "Bench (reps)")
+    dead_kg = _to_float(df_f, "Deadlift (kg)")
+    dead_reps = _to_float(df_f, "Deadlift (reps)")
+    fs_kg = _to_float(df_f, "Front Squat (kg)")
+    fs_reps = _to_float(df_f, "Front Squat (reps)")
+    ohp_kg = _to_float(df_f, "OHP (kg)")
+    ohp_reps = _to_float(df_f, "OHP (reps)")
+    row_kg = _to_float(df_f, "Rowing (kg)")
+    row_reps = _to_float(df_f, "Rowing (reps)")
+    pull_kg = _to_float(df_f, "Traction Lestée (kg)")
+    pull_reps = _to_float(df_f, "Traction Lestée (reps)")
 
     def epley(kg, reps):
         return kg * (1 + reps / 30.0)
@@ -597,11 +871,11 @@ def page_dashboards():
 
     df_c = df_cali.copy().sort_values("Séance")
 
-    hspu = pd.to_numeric(df_c.get("HSPU (reps)"), errors="coerce")
-    mu = pd.to_numeric(df_c.get("MU (reps)"), errors="coerce")
-    planche = pd.to_numeric(df_c.get("Planche (sec)"), errors="coerce")
-    t_lest = pd.to_numeric(df_c.get("Traction Lestée (kg)"), errors="coerce")
-    box = pd.to_numeric(df_c.get("Box Jump (cm)"), errors="coerce")
+    hspu = _to_float(df_c, "HSPU (reps)")
+    mu = _to_float(df_c, "MU (reps)")
+    planche = _to_float(df_c, "Planche (sec)")
+    t_lest = _to_float(df_c, "Traction Lestée (kg)")
+    box = _to_float(df_c, "Box Jump (cm)")
 
     df_c["Calisth Volume (py)"] = (
         hspu * 10 +
@@ -619,28 +893,33 @@ def page_dashboards():
 
 
 def page_pr_sah():
-    st.header("🏆 PR & Score Athlète Hybride")
+    st.header("🏆 PR & Score Athlète Hybride V2")
 
     wb, data_path = get_excel_file(data_only=True)
 
     try:
         df_pr = pd.read_excel(data_path, sheet_name="PR Automatiques")
-        st.subheader("PR Automatiques (Excel)")
+        st.subheader("PR Automatiques (Excel – affichage uniquement)")
         st.dataframe(df_pr)
     except Exception as e:
         st.warning(f"Erreur lecture PR Automatiques : {e}")
 
-    sah, details = compute_sah_score(data_path)
-    st.subheader("Score Athlète Hybride (calcul Python)")
-    if sah is not None:
-        col1, col2 = st.columns(2)
+    sah_v2, details = compute_sah_v2(data_path)
+    st.subheader("Score Athlète Hybride – SAH V2 (calcul Python)")
+
+    if sah_v2 is not None:
+        col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("SAH", value=round(sah, 1))
+            st.metric("SAH V2", value=round(sah_v2, 1))
         with col2:
-            st.write("Détails composantes :")
+            st.metric("StrengthIndex", value=details.get("StrengthIndex", "N/A"))
+        with col3:
+            st.metric("SkillIndex", value=details.get("SkillIndex", "N/A"))
+
+        with st.expander("Détails complets SAH V2"):
             st.json(details)
     else:
-        st.info("Pas encore assez de données (force / calisthénie) pour calculer un SAH.")
+        st.info("Pas encore assez de données (Force/Cali) pour calculer un SAH V2.")
 
 
 def page_planning():
@@ -675,7 +954,7 @@ def page_planning():
 
 
 def page_reco_global():
-    st.header("🧠 Synthèse & Recommandations globales")
+    st.header("🧠 Synthèse & Recommandations globales (100% Python)")
 
     wb, data_path = get_excel_file(data_only=True)
 
@@ -698,41 +977,121 @@ def page_reco_global():
         readiness_moy = None
 
     mean_load, monotony, strain = compute_fatigue_metrics(data_path)
-    sah, sah_details = compute_sah_score(data_path)
+    sah_v2, sah_details = compute_sah_v2(data_path)
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         st.metric(
             "Readiness moyen",
             value=round(readiness_moy, 1) if readiness_moy is not None else "N/A"
         )
+    with col2:
         if mean_load is not None:
             st.metric("Charge moyenne (7 dernières séances)", value=int(mean_load))
         else:
             st.metric("Charge moyenne", value="N/A")
+    with col3:
+        if strain is not None:
+            st.metric("Strain (7 dernières séances)", value=int(strain))
+        else:
+            st.metric("Strain", value="N/A")
 
-    with col2:
+    col4, col5 = st.columns(2)
+    with col4:
         if monotony is not None:
             st.metric("Monotony", value=round(monotony, 2))
         else:
             st.metric("Monotony", value="N/A")
-        if strain is not None:
-            st.metric("Strain", value=int(strain))
+    with col5:
+        if sah_v2 is not None:
+            st.metric("SAH V2", value=round(sah_v2, 1))
         else:
-            st.metric("Strain", value="N/A")
+            st.metric("SAH V2", value="N/A")
 
     st.markdown("---")
-    st.subheader("Score Athlète Hybride (Python)")
-    if sah is not None:
-        st.metric("SAH", value=round(sah, 1))
-        with st.expander("Détails SAH"):
-            st.json(sah_details)
+    st.subheader("Recommandation générale")
+
+    if readiness_moy is None or mean_load is None or strain is None:
+        st.info("Pas encore assez de données pour générer une recommandation complète.")
+        return
+
+    # Reco simple ici (Auto-Séance détaillée sur la page dédiée)
+    if readiness_moy >= 70 and strain < 20000:
+        st.write("✅ Tu es dans une bonne zone pour pousser sur des séances lourdes ou de volume.")
+    elif readiness_moy < 40 or strain >= 25000:
+        st.write("⚠️ Zone de fatigue élevée : privilégie la gestion de la récupération, le skill propre ou le deload.")
     else:
-        st.info("Pas encore assez de données pour calculer un SAH.")
+        st.write("🟡 Zone intermédiaire : continue à progresser mais surveille ton sommeil, stress et volumes.")
 
-    st.markdown("---")
-    st.subheader("Séance recommandée (logique à définir)")
-    st.write("🔜 Prochaine étape : lier Readiness + Strain pour proposer automatiquement Heavy / Volume / Skill / Rest.")
+
+def page_auto_seance():
+    st.header("🤖 Auto-Séance intelligente – Coach Empereur")
+
+    wb, data_path = get_excel_file(data_only=True)
+
+    st.markdown("Cette page te propose un **type de séance du jour** basé sur :")
+    st.markdown("- Ta dernière valeur de **Readiness**")
+    st.markdown("- La **charge** et le **strain** des 7 dernières séances")
+    st.markdown("- Ton **niveau Skill** (calisthénie / puissance)")
+    st.markdown("- L’**objectif du bloc** que tu choisis")
+    st.markdown("- Le type de ta **dernière séance**")
+
+    block_focus = st.selectbox(
+        "Objectif du bloc en cours",
+        [
+            "Force maximale",
+            "Hypertrophie / Volume",
+            "Skill / Calisthénie",
+            "Puissance / Explosivité",
+            "Déload / Gestion fatigue",
+        ]
+    )
+
+    if st.button("⚡ Générer la séance recommandée"):
+        reco = compute_auto_seance_recommendation(data_path, block_focus)
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Readiness (dernier jour)", value=round(reco["readiness"], 1))
+        with col2:
+            st.metric("Strain (7 dernières séances)", value=int(reco["strain"]))
+        with col3:
+            st.metric("SAH V2", value=round(reco["sah_v2"], 1) if reco["sah_v2"] is not None else "N/A")
+
+        st.markdown("---")
+        st.subheader("🧬 Profil actuel")
+        col4, col5, col6 = st.columns(3)
+        with col4:
+            st.metric("StrengthIndex", value=round(reco["strength_index"], 1))
+        with col5:
+            st.metric("SkillIndex", value=round(reco["skill_index"], 1))
+        with col6:
+            st.metric("PowerIndex", value=round(reco["power_index"], 1))
+
+        st.write(f"**Niveau Skill :** {reco['skill_level']}")
+
+        if reco["last_session"] is not None:
+            st.markdown("**Dernière séance enregistrée :**")
+            st.json(reco["last_session"])
+
+        st.markdown("---")
+        st.subheader("📋 Séance du jour recommandée")
+
+        st.write(f"**Type de séance :** {reco['session_type']}")
+        st.write(f"**Focus :** {reco['focus']}")
+        st.write(f"**Intensité :** {reco['intensity']}")
+        st.write(f"**Volume relatif :** {reco['volume_mod']}")
+        st.write(f"**RPE cible :** {reco['rpe_target']}")
+
+        if reco["notes"]:
+            st.markdown("**Notes du coach :**")
+            for n in reco["notes"]:
+                st.write(f"- {n}")
+
+        if reco["structure_suggestion"]:
+            st.markdown("**Structure suggérée :**")
+            for s in reco["structure_suggestion"]:
+                st.write(f"- {s}")
 
 
 def page_export_debug():
@@ -814,8 +1173,6 @@ def page_export_debug():
             st.info("Aucun fichier de données à supprimer.")
 
 
-
-
 # ======================
 # MAIN
 # ======================
@@ -826,16 +1183,17 @@ PAGES = {
     "Séance Calisthénie": page_calisthenie,
     "RPE du jour": page_rpe_jour,
     "Dashboards Volume / 1RM / Cali": page_dashboards,
-    "PR & SAH": page_pr_sah,
+    "PR & SAH V2": page_pr_sah,
     "Planning (Annuel / Mésocycles)": page_planning,
     "Synthèse & Recos Globales": page_reco_global,
+    "Auto-Séance intelligente": page_auto_seance,
     "Export / Debug": page_export_debug,
 }
 
 
 def main():
-    st.set_page_config(page_title="Système Empereur", layout="wide")
-    st.sidebar.title("Système d'entraînement de l'Empereur")
+    st.set_page_config(page_title="Système Empereur – V2", layout="wide")
+    st.sidebar.title("Système d'entraînement de l'Empereur – V2")
     choix = st.sidebar.radio("Navigation", list(PAGES.keys()))
     st.sidebar.markdown("---")
     st.sidebar.write(f"Modèle : `{TEMPLATE_FILE}`")
