@@ -392,6 +392,49 @@ def page_reco_global():
 # ======================
 # MAIN
 # ======================
+from io import BytesIO
+
+def page_export_debug():
+    st.header("📥 Export & Debug des données Empereur")
+
+    # 1) Aperçu Lifestyle
+    st.subheader("Dernières entrées Lifestyle")
+    try:
+        _, data_path = get_excel_file()
+        df_life = pd.read_excel(data_path, sheet_name="Lifestyle")
+        st.dataframe(df_life.tail(10))
+    except Exception as e:
+        st.warning(f"Impossible de lire la feuille Lifestyle : {e}")
+
+    st.markdown("---")
+
+    # 2) Aperçu Données Force
+    st.subheader("Dernières entrées Séances Force")
+    try:
+        df_force = pd.read_excel(data_path, sheet_name="Données Force")
+        st.dataframe(df_force.tail(10))
+    except Exception as e:
+        st.warning(f"Impossible de lire la feuille Données Force : {e}")
+
+    st.markdown("---")
+
+    # 3) Téléchargement du fichier empereur_data.xlsx
+    st.subheader("Télécharger le fichier de données complet")
+
+    data_path = Path(DATA_FILE)
+    if not data_path.exists():
+        st.info("Aucun fichier empereur_data.xlsx trouvé pour l'instant (enregistre au moins une donnée).")
+        return
+
+    with open(data_path, "rb") as f:
+        binary = f.read()
+
+    st.download_button(
+        label="📥 Télécharger empereur_data.xlsx",
+        data=binary,
+        file_name="empereur_data.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
 PAGES = {
     "Lifestyle": page_lifestyle,
@@ -402,6 +445,7 @@ PAGES = {
     "PR & SAH": page_pr_sah,
     "Planning (Annuel / Mésocycles)": page_planning,
     "Synthèse & Recos Globales": page_reco_global,
+    "Export / Debug": page_export_debug,
 }
 
 def main():
