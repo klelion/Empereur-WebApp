@@ -81,6 +81,7 @@ def page_lifestyle():
         humeur = st.number_input("Humeur (0-10)", 0.0, 10.0, 7.0, 0.5)
 
     if st.button("💾 Enregistrer Lifestyle"):
+        # Trouver la première ligne vide
         row = None
         for r in range(2, ws.max_row + 2):
             if ws.cell(row=r, column=1).value is None:
@@ -89,17 +90,36 @@ def page_lifestyle():
         if row is None:
             row = ws.max_row + 1
 
+        # On convertit une bonne fois pour toutes en float
+        s = float(sommeil)
+        h = float(hydrat)
+        n = float(nutri)
+        stv = float(stress)
+        c = float(conc)
+        e = float(energie)
+        hm = float(humeur)
+
+        # Écriture brute
         ws.cell(row=row, column=1).value = jour
-        ws.cell(row=row, column=2).value = float(sommeil)
-        ws.cell(row=row, column=3).value = float(hydrat)
-        ws.cell(row=row, column=4).value = float(nutri)
-        ws.cell(row=row, column=5).value = float(stress)
-        ws.cell(row=row, column=6).value = float(conc)
-        ws.cell(row=row, column=7).value = float(energie)
-        ws.cell(row=row, column=8).value = float(humeur)
+        ws.cell(row=row, column=2).value = s
+        ws.cell(row=row, column=3).value = h
+        ws.cell(row=row, column=4).value = n
+        ws.cell(row=row, column=5).value = stv
+        ws.cell(row=row, column=6).value = c
+        ws.cell(row=row, column=7).value = e
+        ws.cell(row=row, column=8).value = hm
+
+        # 🔥 Calcul Readiness en Python (0–100)
+        score_pos = (s + h + n + c + e + hm) / 6.0
+        score_stress = 10.0 - stv
+        readiness10 = 0.7 * score_pos + 0.3 * score_stress   # 0–10
+        readiness100 = round(readiness10 * 10)                # 0–100
+
+        # Colonne 9 = Readiness
+        ws.cell(row=row, column=9).value = readiness100
 
         wb.save(data_path)
-        st.success("Lifestyle enregistré.")
+        st.success(f"Lifestyle jour {jour} enregistré. Readiness = {readiness100}/100")
 
 
 def page_force():
@@ -257,96 +277,113 @@ def page_dashboards():
     st.header("📊 Dashboards – Volume, 1RM, Calisthénie")
 
     wb, data_path = get_excel_file()
+
+    # ====== LECTURE DONNÉES FORCE ======
     try:
         df_force = pd.read_excel(data_path, sheet_name="Données Force")
     except Exception as e:
         st.error(f"Erreur lecture Données Force : {e}")
         return
 
-    if "Séance" in df_force.columns:
-        df_f = df_force.sort_values("Séance")
-
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("Volume par séance")
-            if "Session Volume (kg·reps)" in df_f.columns:
-                st.line_chart(df_f.set_index("Séance")["Session Volume (kg·reps)"])
-            else:
-                st.info("Pas de colonne 'Session Volume (kg·reps)'.")
-
-        with col2:
-            st.subheader("1RM Estimées (Squat / Bench / Deadlift)")
-            cols_1rm = [c for c in ["Squat 1RM Est","Bench 1RM Est","Deadlift 1RM Est"] if c in df_f.columns]
-            if cols_1rm:
-                st.line_chart(df_f.set_index("Séance")[cols_1rm])
-            else:
-                st.info("Pas de colonnes 1RM trouvées.")
-    else:
+    if "Séance" not in df_force.columns:
         st.info("Pas de colonne 'Séance' dans Données Force.")
+        return
+
+    df_f = df_force.copy().sort_values("Séance")
+
+    # On s'assure que kg & reps sont numériques
+    def to_float(col):
+        return pd.to_numeric(df_f.get(col), errors="coerce")
+
+    squat_kg = to_float("Squat (kg)")
+    squat_reps = to_float("Squat (reps)")
+    bench_kg = to_float("Bench (kg)")
+    bench_reps = to_float("Bench (reps)")
+    dead_kg = to_float("Deadlift (kg)")
+    dead_reps = to_float("Deadlift (reps)")
+    fs_kg = to_float("Front Squat (kg)")
+    fs_reps = to_float("Front Squat (reps)")
+    ohp_kg = to_float("OHP (kg)")
+    ohp_reps = to_float("OHP (reps)")
+    row_kg = to_float("Rowing (kg)")
+    row_reps = to_float("Rowing (reps)")
+    pull_kg = to_float("Traction Lestée (kg)")
+    pull_reps = to_float("Traction Lestée (reps)")
+
+    # ====== 1RM EPLEY recalculé en Python ======
+    def epley(kg, reps):
+        return kg * (1 + reps / 30.0)
+
+    df_f["Squat 1RM (py)"] = epley(squat_kg, squat_reps)
+    df_f["Bench 1RM (py)"] = epley(bench_kg, bench_reps)
+    df_f["Deadlift 1RM (py)"] = epley(dead_kg, dead_reps)
+
+    # ====== VOLUME SESSION (kg * reps) recalculé ======
+    vol_cols = [
+        squat_kg * squat_reps,
+        fs_kg * fs_reps,
+        bench_kg * bench_reps,
+        dead_kg * dead_reps,
+        ohp_kg * ohp_reps,
+        row_kg * row_reps,
+        pull_kg * pull_reps,
+    ]
+    df_f["Session Volume (py)"] = sum(vol_cols)
+
+    # ====== GRAPHIQUE VOLUME ======
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Volume par séance (calcul Python)")
+        if df_f["Session Volume (py)"].notna().any():
+            st.line_chart(df_f.set_index("Séance")["Session Volume (py)"])
+        else:
+            st.info("Aucun volume calculable (remplis au moins un exo avec kg & reps).")
+
+    # ====== GRAPHIQUE 1RM ======
+    with col2:
+        st.subheader("1RM estimées Squat / Bench / Deadlift (Epley Python)")
+        cols_1rm = ["Squat 1RM (py)", "Bench 1RM (py)", "Deadlift 1RM (py)"]
+        if any(df_f[c].notna().any() for c in cols_1rm):
+            st.line_chart(df_f.set_index("Séance")[cols_1rm])
+        else:
+            st.info("Aucun 1RM calculable (remplis kg & reps pour Squat / Bench / Deadlift).")
 
     st.markdown("---")
 
+    # ====== CALISTHÉNIE ======
     try:
         df_cali = pd.read_excel(data_path, sheet_name="Données Calisthénie")
-        st.subheader("Volume Calisthénie")
-        if "Séance" in df_cali.columns and "Calisth. Volume (unités)" in df_cali.columns:
-            st.line_chart(df_cali.set_index("Séance")["Calisth. Volume (unités)"])
-        else:
-            st.info("Colonnes 'Séance' ou 'Calisth. Volume (unités)' manquantes.")
     except Exception as e:
         st.warning(f"Erreur lecture Données Calisthénie : {e}")
+        return
 
+    if "Séance" not in df_cali.columns:
+        st.info("Pas de colonne 'Séance' dans Données Calisthénie.")
+        return
 
-def page_pr_sah():
-    st.header("🏆 PR & Score Athlète Hybride")
+    df_c = df_cali.copy().sort_values("Séance")
 
-    wb, data_path = get_excel_file(data_only=True)
+    # On recalcule un volume cali simple si besoin
+    hspu = pd.to_numeric(df_c.get("HSPU (reps)"), errors="coerce")
+    mu = pd.to_numeric(df_c.get("MU (reps)"), errors="coerce")
+    planche = pd.to_numeric(df_c.get("Planche (sec)"), errors="coerce")
+    t_lest = pd.to_numeric(df_c.get("Traction Lestée (kg)"), errors="coerce")
+    box = pd.to_numeric(df_c.get("Box Jump (cm)"), errors="coerce")
 
-    try:
-        df_pr = pd.read_excel(data_path, sheet_name="PR Automatiques")
-        st.subheader("PR Automatiques")
-        st.dataframe(df_pr)
-    except Exception as e:
-        st.warning(f"Erreur lecture PR Automatiques : {e}")
+    # pondérations arbitraires mais cohérentes avec ton système
+    df_c["Calisth Volume (py)"] = (
+        hspu * 10 +
+        mu * 15 +
+        planche * 1 +
+        t_lest * 5 +
+        box * 2
+    )
 
-    try:
-        ws_sah = wb["Score Athlète Hybride"]
-        sah = ws_sah["F2"].value
-        st.subheader("Score Athlète Hybride (SAH)")
-        st.metric("SAH", value=sah if sah is not None else "N/A")
-    except Exception as e:
-        st.warning(f"Impossible de lire le score SAH : {e}")
-
-
-def page_planning():
-    st.header("📅 Planning – Plan Annuel & Mésocycles")
-
-    wb, data_path = get_excel_file()
-
-    col1, col2 = st.columns(2)
-    try:
-        df_annuel = pd.read_excel(data_path, sheet_name="Plan Annuel")
-        with col1:
-            st.subheader("Plan Annuel")
-            st.dataframe(df_annuel)
-    except Exception as e:
-        st.warning(f"Erreur lecture Plan Annuel : {e}")
-
-    try:
-        df_meso = pd.read_excel(data_path, sheet_name="Mésocycle-Type")
-        with col2:
-            st.subheader("Mésocycle-Type")
-            st.dataframe(df_meso)
-    except Exception as e:
-        st.warning(f"Erreur lecture Mésocycle-Type : {e}")
-
-    st.markdown("---")
-    try:
-        df_auto_meso = pd.read_excel(data_path, sheet_name="Auto-Mesocycles")
-        st.subheader("Auto-Mesocycles")
-        st.dataframe(df_auto_meso)
-    except Exception as e:
-        st.warning(f"Erreur lecture Auto-Mesocycles : {e}")
+    st.subheader("Volume Calisthénie (calcul Python)")
+    if df_c["Calisth Volume (py)"].notna().any():
+        st.line_chart(df_c.set_index("Séance")["Calisth Volume (py)"])
+    else:
+        st.info("Aucun volume calisthénie calculable pour l’instant.")
 
 
 def page_reco_global():
