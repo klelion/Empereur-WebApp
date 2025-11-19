@@ -137,7 +137,7 @@ def get_excel_file(data_only=False):
 def get_next_lifestyle_day(ws):
     """Retourne le prochain jour à utiliser en ne tenant compte
     que des lignes où il y a vraiment des données Lifestyle.
-    Ça permet d'ignorer les lignes pré-remplies 1..30 vides.
+    On ignore les formules de Readiness en colonne 9.
     """
     last = 0
     for row in range(2, ws.max_row + 1):
@@ -145,9 +145,9 @@ def get_next_lifestyle_day(ws):
         if not isinstance(jour, int):
             continue
 
-        # On regarde s'il y a au moins une donnée (Sommeil à Humeur ou Readiness)
+        # On regarde s'il y a au moins une donnée réelle (Sommeil à Humeur, colonnes 2 à 8)
         has_data = False
-        for col in range(2, 10):  # colonnes 2 à 9
+        for col in range(2, 9):  # on ignore la colonne 9 qui contient une formule par défaut
             if ws.cell(row=row, column=col).value not in (None, ""):
                 has_data = True
                 break
@@ -1330,8 +1330,8 @@ PAGES = {
 
 
 def main():
-    st.set_page_config(page_title="Système Empereur – V3", layout="wide")
-    st.sidebar.title("Système d'entraînement de l'Empereur – V3")
+    st.set_page_config(page_title="Système Empereur – V3.1", layout="wide")
+    st.sidebar.title("Système d'entraînement de l'Empereur – V3.1")
     choix = st.sidebar.radio("Navigation", list(PAGES.keys()))
     st.sidebar.markdown("---")
     st.sidebar.write(f"Modèle : `{TEMPLATE_FILE}`")
