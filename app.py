@@ -114,8 +114,7 @@ FULL_MODES["Farmer Walk lourd"] = "kg_only"
 # ======================
 
 def get_excel_file(data_only=False):
-    """
-    Utilise une copie DATA_FILE modifiable.
+    """Utilise une copie DATA_FILE modifiable.
     Si absente, on la crée à partir du TEMPLATE_FILE.
     """
     template_path = Path(TEMPLATE_FILE)
@@ -136,11 +135,27 @@ def get_excel_file(data_only=False):
 # ======================
 
 def get_next_lifestyle_day(ws):
+    """Retourne le prochain jour à utiliser en ne tenant compte
+    que des lignes où il y a vraiment des données Lifestyle.
+    Ça permet d'ignorer les lignes pré-remplies 1..30 vides.
+    """
     last = 0
     for row in range(2, ws.max_row + 1):
-        val = ws.cell(row=row, column=1).value
-        if isinstance(val, int) and val > last:
-            last = val
+        jour = ws.cell(row=row, column=1).value
+        if not isinstance(jour, int):
+            continue
+
+        # On regarde s'il y a au moins une donnée (Sommeil à Humeur ou Readiness)
+        has_data = False
+        for col in range(2, 10):  # colonnes 2 à 9
+            if ws.cell(row=row, column=col).value not in (None, ""):
+                has_data = True
+                break
+
+        if has_data and jour > last:
+            last = jour
+
+    # Si rien de rempli -> on commence à 1
     return last + 1 if last > 0 else 1
 
 
@@ -221,8 +236,7 @@ def page_lifestyle():
 # ======================
 
 def rpe_from_max(val, unit):
-    """
-    Retourne un dict {5: v5, ..., 10: v10} à partir d'une valeur max.
+    """Retourne un dict {5: v5, ..., 10: v10} à partir d'une valeur max.
     Pour les kg : pourcentages plus fins.
     Pour reps/sec : proportion linéaire.
     """
@@ -252,14 +266,12 @@ def rpe_from_max(val, unit):
 
 
 def recompute_rpe_database(wb, data_path):
-    """
-    Lit RPE_EXAM, applique la logique de calcul + propagation HSPU,
+    """Lit RPE_EXAM, applique la logique de calcul + propagation HSPU,
     et écrit RPE_DATABASE.
     """
-    # On travaille avec pandas pour simplifier
     df_exam = pd.read_excel(data_path, sheet_name="RPE_EXAM")
-    # Création des valeurs max de base
-    max_map = {}  # exo -> (unit, val_brut)
+
+    max_map = {}
 
     for _, row in df_exam.iterrows():
         ex = row["Exercice"]
@@ -278,9 +290,6 @@ def recompute_rpe_database(wb, data_path):
 
         max_map[ex] = (unit, val)
 
-    # Propagation Pike -> HSPU Négative -> HSPU partiels -> HSPU
-    # Seulement si la cible n'a PAS déjà une valeur.
-    # Approximations : très simple, basées sur des ratios.
     pike = max_map.get("Pike push-up", (None, None))[1]
     hspu_neg_unit, hspu_neg_val = max_map.get("HSPU Négative", ("reps", None))
     hspu_part_unit, hspu_part_val = max_map.get("HSPU partiels (mur)", ("reps", None))
@@ -298,7 +307,6 @@ def recompute_rpe_database(wb, data_path):
         hspu_val = max(1, int(round(hspu_part_val / 2)))
         max_map["HSPU"] = ("reps", hspu_val)
 
-    # Construire le nouveau RPE_DATABASE
     rows = []
     for _, row in df_exam.iterrows():
         ex = row["Exercice"]
@@ -320,7 +328,6 @@ def recompute_rpe_database(wb, data_path):
     df_db = pd.DataFrame(rows, columns=["Exercice", "Category", "Unit",
                                         "RPE5", "RPE6", "RPE7", "RPE8", "RPE9", "RPE10"])
 
-    # Écrire dans la feuille RPE_DATABASE
     if "RPE_DATABASE" not in wb.sheetnames:
         ws_db = wb.create_sheet("RPE_DATABASE")
     else:
@@ -338,25 +345,20 @@ def page_rpe_exam():
     st.header("🎯 RPE EXAM – Tests de référence")
 
     wb, data_path = get_excel_file()
-    # On ne lit pas obligatoirement les valeurs existantes pour l'instant (tu entres ce que tu veux mettre à jour)
 
     st.markdown("**Entre uniquement les exos que tu as testés.** Les autres resteront avec leurs anciennes valeurs.")
 
-    # Helper UI pour un bloc
     def bloc_exam(title, exos, rules_key_prefix):
         st.subheader(title)
         for ex in exos:
             cols = st.columns(3)
             cols[0].markdown(f"**{ex}**")
-            # Règles spécifiques
             kg_field, reps_field, sec_field = None, None, None
 
             if title.startswith("EXAMENS LEGS"):
-                # Tous : kg + reps
                 kg_field = cols[1].text_input("kg", key=f"{rules_key_prefix}_{ex}_kg")
                 reps_field = cols[2].text_input("reps", key=f"{rules_key_prefix}_{ex}_reps")
             elif title.startswith("EXAMENS FULL"):
-                # Tous : kg + reps sauf Farmer Walk (kg only)
                 if ex == "Farmer Walk lourd":
                     kg_field = cols[1].text_input("kg", key=f"{rules_key_prefix}_{ex}_kg")
                 else:
@@ -367,9 +369,7 @@ def page_rpe_exam():
                     reps_field = cols[2].text_input("reps", key=f"{rules_key_prefix}_{ex}_reps")
                 elif ex in ["Chest-to-wall Hold", "Handstand Hold"]:
                     sec_field = cols[2].text_input("sec", key=f"{rules_key_prefix}_{ex}_sec")
-                elif ex in ["Pike push-up", "HSPU Négative", "HSPU partiels (mur)"]:
-                    reps_field = cols[2].text_input("reps", key=f"{rules_key_prefix}_{ex}_reps")
-                elif ex == "HSPU":
+                elif ex in ["Pike push-up", "HSPU Négative", "HSPU partiels (mur)", "HSPU"]:
                     reps_field = cols[2].text_input("reps", key=f"{rules_key_prefix}_{ex}_reps")
                 else:
                     kg_field = cols[1].text_input("kg", key=f"{rules_key_prefix}_{ex}_kg")
@@ -380,7 +380,6 @@ def page_rpe_exam():
                 else:
                     kg_field = cols[1].text_input("kg", key=f"{rules_key_prefix}_{ex}_kg")
                     reps_field = cols[2].text_input("reps", key=f"{rules_key_prefix}_{ex}_reps")
-            # on ne retourne rien, on lit plus tard via st.session_state
 
     bloc_exam("EXAMENS LEGS RPE :", LEGS_EXOS, "LEGS")
     st.markdown("---")
@@ -391,10 +390,8 @@ def page_rpe_exam():
     bloc_exam("EXAMENS FULL RPE :", FULL_EXOS, "FULL")
 
     if st.button("✅ Valider les examens RPE"):
-        # Mettre à jour RPE_EXAM uniquement pour les champs non vides
         ws = wb["RPE_EXAM"]
 
-        # Construction d'un index exercice -> row
         ex_row_map = {}
         for r in range(2, ws.max_row + 1):
             ex_name = ws.cell(row=r, column=1).value
@@ -412,7 +409,6 @@ def page_rpe_exam():
                 reps_val = st.session_state.get(reps_key, "").strip() if reps_key in st.session_state else ""
                 sec_val = st.session_state.get(sec_key, "").strip() if sec_key in st.session_state else ""
 
-                # colonnes : Exercice, Category, Max_kg, Max_reps, Max_sec, Unit
                 if kg_val != "":
                     try:
                         ws.cell(row=row, column=3).value = float(kg_val)
@@ -435,10 +431,7 @@ def page_rpe_exam():
         update_exos(FULL_EXOS, "FULL")
 
         wb.save(data_path)
-
-        # Recalcul complet de la base de données RPE
         recompute_rpe_database(wb, data_path)
-
         st.success("Examens RPE mis à jour et base de données RPE recalculée.")
 
 
@@ -480,11 +473,9 @@ def page_rpe_database():
 # ======================
 
 def find_or_create_session_row(ws, session_number: int):
-    # Colonne 1 = Séance
     for r in range(2, ws.max_row + 1):
         if ws.cell(row=r, column=1).value == session_number:
             return r
-    # sinon, nouvelle ligne
     new_row = ws.max_row + 1 if ws.max_row >= 2 else 2
     ws.cell(row=new_row, column=1).value = session_number
     return new_row
@@ -502,11 +493,9 @@ def page_seance_generic(title, sheet_name, exos, modes):
     session = st.number_input("Numéro de séance", min_value=1, step=1, value=1)
     st.write("Remplis uniquement les exercices faits. Laisse vide pour ignorer.")
 
-    # Construire un mapping nom_col -> index pour retrouver plus tard
     headers = {ws.cell(row=1, column=c).value: c for c in range(1, ws.max_column + 1)}
 
-    # UI inputs
-    inputs = []  # (col_name, type_value, string_value)
+    inputs = []
 
     for ex in exos:
         mode = modes.get(ex, "kg_reps")
@@ -542,7 +531,6 @@ def page_seance_generic(title, sheet_name, exos, modes):
                     val = int(float(sval))
                 ws.cell(row=row, column=col_idx).value = val
             except ValueError:
-                # On ignore les entrées non numériques
                 continue
 
         wb.save(data_path)
@@ -617,7 +605,6 @@ def compute_session_metrics(data_path: Path):
                 else:
                     load_row += base
             elif col.endswith(" (reps)") or col.endswith(" (sec)"):
-                # compté comme volume simple
                 load_row += float(val)
 
         loads[s] = loads.get(s, 0.0) + load_row
@@ -667,7 +654,6 @@ def compute_sah_v2(data_path: Path):
     if df_all is None:
         return None, {}
 
-    # Colonnes clés
     sq_back_kg = _to_float(df_all.get("Back Squat (kg)"))
     sq_back_reps = _to_float(df_all.get("Back Squat (reps)"))
     sq_front_kg = _to_float(df_all.get("Front Squat (wedge) (kg)"))
@@ -677,10 +663,12 @@ def compute_sah_v2(data_path: Path):
     roman_kg = _to_float(df_all.get("Romanian Deadlift (barre) (kg)"))
     roman_reps = _to_float(df_all.get("Romanian Deadlift (barre) (reps)"))
 
-    # 1RM
     squat1_back = epley(sq_back_kg, sq_back_reps)
     squat1_front = epley(sq_front_kg, sq_front_reps)
-    squat_1rm = np.nanmax(np.vstack([squat1_back, squat1_front]), axis=0) if squat1_back.size and squat1_front.size else squat1_back if squat1_back.size else squat1_front
+    if squat1_back.size and squat1_front.size:
+        squat_1rm = np.nanmax(np.vstack([squat1_back, squat1_front]), axis=0)
+    else:
+        squat_1rm = squat1_back if squat1_back.size else squat1_front
 
     bench_1rm = epley(bench_kg, bench_reps)
     dead_1rm = epley(roman_kg, roman_reps)
@@ -689,7 +677,6 @@ def compute_sah_v2(data_path: Path):
     best_bench = safe_nanmax(bench_1rm)
     best_dead = safe_nanmax(dead_1rm)
 
-    # Cibles empereur
     sq_target = 220.0
     bp_target = 160.0
     dl_target = 260.0
@@ -707,7 +694,6 @@ def compute_sah_v2(data_path: Path):
         "StrengthIndex": round(strength_index, 1),
     }
 
-    # Skill : HSPU, MU, Tractions lestées
     hspu_reps = _to_float(df_all.get("HSPU (reps)"))
     mu_reps = _to_float(df_all.get("Muscle-up (reps)"))
     t_lest_kg = _to_float(df_all.get("Tractions lestées (kg)"))
@@ -722,7 +708,6 @@ def compute_sah_v2(data_path: Path):
         "TractionLestee": best_tlest,
     })
 
-    # Cibles
     hspu_target = 20.0
     mu_target = 10.0
     tlest_target = 80.0
@@ -810,7 +795,6 @@ def page_dashboards():
     if df_all is None:
         return
 
-    # 1RM estimés
     sq_back_kg = _to_float(df_all.get("Back Squat (kg)"))
     sq_back_reps = _to_float(df_all.get("Back Squat (reps)"))
     sq_front_kg = _to_float(df_all.get("Front Squat (wedge) (kg)"))
@@ -931,7 +915,6 @@ def page_reco_global():
 
     wb, data_path = get_excel_file(data_only=True)
 
-    # Readiness moyen
     try:
         df_life = pd.read_excel(data_path, sheet_name="Lifestyle")
         if "Readiness" in df_life.columns:
